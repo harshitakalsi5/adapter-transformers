@@ -25,6 +25,19 @@ from torch import nn
 from torch.nn import CrossEntropyLoss
 
 from ...activations import ACT2FN
+from ...adapters.composition import adjust_tensors_for_parallel
+from ...adapters.context import ForwardContext
+from ...adapters.lora import Linear as LoRALinear
+from ...adapters.mixins.whisper import (
+    
+    WhisperDecoderLayerAdaptersMixin,
+    WhisperEncoderLayerAdaptersMixin,
+    WhisperModelAdaptersMixin,
+    WhisperModelWithHeadsAdaptersMixin,
+)
+
+from ...adapters.model_mixin import InvertibleAdaptersMixin
+from ...adapters.prefix_tuning import PrefixTuningShim
 from ...modeling_outputs import (
     BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
@@ -110,11 +123,13 @@ class WhisperAttention(nn.Module):
 
     def __init__(
         self,
+        config: WhisperConfig,
         embed_dim: int,
         num_heads: int,
         dropout: float = 0.0,
         is_decoder: bool = False,
         bias: bool = True,
+        location_key: Optional[str] = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
@@ -135,6 +150,7 @@ class WhisperAttention(nn.Module):
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
+        self.prefix_tuning = PrefixTuningShim(location_key + "_prefix" if location_key else None, config)
     # Copied from transformers.models.bart.modeling_bart.BartAttention._shape with BART->whisper
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
@@ -267,9 +283,11 @@ class WhisperEncoderLayer(nn.Module):
         super().__init__()
         self.embed_dim = config.d_model
         self.self_attn = WhisperAttention(
+            config,
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
+            location_key="encoder",
         )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
@@ -278,6 +296,8 @@ class WhisperEncoderLayer(nn.Module):
         self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+
+        self._init_adapter_modules()
 
     def forward(
         self,
@@ -331,16 +351,18 @@ class WhisperEncoderLayer(nn.Module):
 
 
 # Copied from transformers.models.mbart.modeling_mbart.MBartDecoderLayer with MBart->Whisper
-class WhisperDecoderLayer(nn.Module):
+class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
     def __init__(self, config: WhisperConfig):
         super().__init__()
         self.embed_dim = config.d_model
 
         self.self_attn = WhisperAttention(
+            config,
             embed_dim=self.embed_dim,
             num_heads=config.decoder_attention_heads,
             dropout=config.attention_dropout,
             is_decoder=True,
+            location_key="self",
         )
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -348,15 +370,19 @@ class WhisperDecoderLayer(nn.Module):
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.encoder_attn = WhisperAttention(
+            config,
             self.embed_dim,
             config.decoder_attention_heads,
             dropout=config.attention_dropout,
             is_decoder=True,
+            location_key="cross",
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
         self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
+
+        self._init_adapter_modules()
 
     def forward(
         self,
@@ -447,7 +473,7 @@ class WhisperDecoderLayer(nn.Module):
 
         return outputs
 
-
+#BART class
 class WhisperPreTrainedModel(PreTrainedModel):
     config_class = WhisperConfig
     base_model_prefix = "model"
@@ -573,7 +599,7 @@ WHISPER_INPUTS_DOCSTRING = r"""
 """
 
 
-class WhisperEncoder(WhisperPreTrainedModel):
+class WhisperEncoder(InvertibleAdaptersMixin,WhisperPreTrainedModel):
     """
     Transformer encoder consisting of *config.encoder_layers* self attention layers. Each layer is a
     [`WhisperEncoderLayer`].
@@ -658,6 +684,8 @@ class WhisperEncoder(WhisperPreTrainedModel):
 
         hidden_states = inputs_embeds + embed_pos
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
+
+        hidden_states = self.invertible_adapters_forward(hidden_states)
 
         encoder_states = () if output_hidden_states else None
         all_attentions = () if output_attentions else None
@@ -971,7 +999,7 @@ class WhisperDecoder(WhisperPreTrainedModel):
     "The bare Whisper Model outputting raw hidden-states without any specific head on top.",
     WHISPER_START_DOCSTRING,
 )
-class WhisperModel(WhisperPreTrainedModel):
+class WhisperModel(WhisperModelAdaptersMixin,WhisperPreTrainedModel):
     _keys_to_ignore_on_load_missing = [r"proj_out.weight"]
 
     def __init__(self, config: WhisperConfig):
@@ -980,6 +1008,8 @@ class WhisperModel(WhisperPreTrainedModel):
         self.encoder = WhisperEncoder(config)
         self.decoder = WhisperDecoder(config)
         # Initialize weights and apply final processing
+        self._init_adapter_modules()
+
         self.post_init()
 
     def get_input_embeddings(self):
@@ -1095,7 +1125,7 @@ class WhisperModel(WhisperPreTrainedModel):
     "The Whisper Model with a language modeling head. Can be used for automatic speech recognition.",
     WHISPER_START_DOCSTRING,
 )
-class WhisperForConditionalGeneration(WhisperPreTrainedModel):
+class WhisperForConditionalGeneration(WhisperModelWithHeadsAdaptersMixin,WhisperPreTrainedModel):
     base_model_prefix = "model"
     _keys_to_ignore_on_load_missing = [
         r"encoder.version",
@@ -1208,6 +1238,8 @@ class WhisperForConditionalGeneration(WhisperPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+
+        lm_logits = self.model.encoder.invertible_adapters_forward(outputs[0], rev=True)
         lm_logits = self.proj_out(outputs[0])
 
         loss = None
@@ -1259,3 +1291,24 @@ class WhisperForConditionalGeneration(WhisperPreTrainedModel):
         for layer_past in past:
             reordered_past += (tuple(past_state.index_select(0, beam_idx) for past_state in layer_past),)
         return reordered_past
+
+#Optional
+class WhisperDecoderWrapper(WhisperModelAdaptersMixin, WhisperPreTrainedModel):
+    """
+    This wrapper class is a helper class to correctly load pretrained checkpoints when the causal language model is
+    used in combination with the [`EncoderDecoderModel`] framework.
+    """
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.decoder = WhisperDecoder(config)
+
+        self._init_adapter_modules()
+
+    @ForwardContext.wrap
+    def forward(self, *args, **kwargs):
+
+        return self.decoder(*args, **kwargs)
+
+    def get_input_embeddings(self):
+        return self.decoder.get_input_embeddings()

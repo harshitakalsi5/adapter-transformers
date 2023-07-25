@@ -180,7 +180,7 @@ class BartAttention(nn.Module):
         self.v_proj = LoRALinear(embed_dim, embed_dim, "selfattn", config, attn_key="v", bias=bias)
         self.q_proj = LoRALinear(embed_dim, embed_dim, "selfattn", config, attn_key="q", bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-
+#TODO
         self.prefix_tuning = PrefixTuningShim(location_key + "_prefix" if location_key else None, config)
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
@@ -326,7 +326,7 @@ class BartEncoderLayer(BartEncoderLayerAdaptersMixin, nn.Module):
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
             location_key="encoder",
-        )
+        ) #TODO
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
@@ -400,7 +400,7 @@ class BartDecoderLayer(BartDecoderLayerAdaptersMixin, nn.Module):
             dropout=config.attention_dropout,
             is_decoder=True,
             location_key="self",
-        )
+        )#TODO
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
         self.activation_dropout = config.activation_dropout
@@ -413,7 +413,7 @@ class BartDecoderLayer(BartDecoderLayerAdaptersMixin, nn.Module):
             dropout=config.attention_dropout,
             is_decoder=True,
             location_key="cross",
-        )
+        )#TODO
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.fc1 = LoRALinear(self.embed_dim, config.encoder_ffn_dim, "intermediate", config)
         self.fc2 = LoRALinear(config.encoder_ffn_dim, self.embed_dim, "output", config)
@@ -507,7 +507,7 @@ class BartDecoderLayer(BartDecoderLayerAdaptersMixin, nn.Module):
 
         return outputs
 
-
+#TODO
 class BartClassificationHead(nn.Module):
     """Head for sentence-level classification tasks."""
 
@@ -766,10 +766,10 @@ class BartEncoder(InvertibleAdaptersMixin, BartPretrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
-
+#TODO
     def get_input_embeddings(self):
         return self.embed_tokens
-
+#TODO
     def set_input_embeddings(self, value):
         self.embed_tokens = value
 

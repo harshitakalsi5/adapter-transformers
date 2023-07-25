@@ -54,6 +54,12 @@ CONFIG_CLASS_KEYS_MAPPING = {
         "attention_probs_dropout_prob": "dropout_rate",
     },
     "vit": {},
+    "whisper": {
+        "num_attention_heads": "encoder_attention_heads",
+        "hidden_size": "d_model",
+        "hidden_dropout_prob": "dropout",
+        "attention_probs_dropout_prob": "attention_dropout",
+    },
     "xlm_roberta": {},
 }
 SUBMODEL_NAMES = {"clip": ["vision_config", "text_config"], "encoder-decoder": ["encoder", "decoder"]}
