@@ -278,9 +278,10 @@ class WhisperAttention(nn.Module):
 
 
 # Copied from transformers.models.mbart.modeling_mbart.MBartEncoderLayer with MBart->Whisper
-class WhisperEncoderLayer(nn.Module):
+class WhisperEncoderLayer(WhisperEncoderLayerAdaptersMixin,nn.Module):
     def __init__(self, config: WhisperConfig):
         super().__init__()
+        self.config = config
         self.embed_dim = config.d_model
         self.self_attn = WhisperAttention(
             config,
@@ -296,7 +297,6 @@ class WhisperEncoderLayer(nn.Module):
         self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
         self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
-
         self._init_adapter_modules()
 
     def forward(
@@ -354,6 +354,7 @@ class WhisperEncoderLayer(nn.Module):
 class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
     def __init__(self, config: WhisperConfig):
         super().__init__()
+        self.config = config
         self.embed_dim = config.d_model
 
         self.self_attn = WhisperAttention(

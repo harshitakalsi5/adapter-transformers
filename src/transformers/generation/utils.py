@@ -24,7 +24,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 
-from transformers.adapters.composition import adjust_tensors_for_parallel
+from src.transformers.adapters.composition import adjust_tensors_for_parallel
 
 from ..adapters.context import ForwardContext
 from ..modeling_outputs import CausalLMOutputWithPast, Seq2SeqLMOutput
