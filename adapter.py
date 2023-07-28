@@ -1,10 +1,11 @@
 import torch
 import evaluate
+import pandas as pd
 from transformers import WhisperTokenizer, WhisperFeatureExtractor, WhisperProcessor
 from src.transformers.models.whisper.modeling_whisper import WhisperForConditionalGeneration
 from src.transformers.adapters import AdapterConfig
 from transformers import Trainer, TrainingArguments, Seq2SeqTrainingArguments
-from datasets import load_dataset, DatasetDict, Audio
+from datasets import load_dataset, DatasetDict, Audio, Dataset
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
  
@@ -15,6 +16,28 @@ common_voice["train"] = load_dataset("mozilla-foundation/common_voice_11_0", "hi
 common_voice["test"] = load_dataset("mozilla-foundation/common_voice_11_0", "hi", split="test")
 common_voice = common_voice.remove_columns(["accent", "age", "client_id", "down_votes", "gender", "locale", "path", "segment", "up_votes"])
 
+# Convert dataset to DataFrame
+data = {'path': [], 'sentence': []}
+for count, example in enumerate(common_voice["train"]):
+    data['path'].append(example["audio"]["path"])
+    data['sentence'].append(example["sentence"])
+
+df = pd.DataFrame(data)
+# Just specify how many lines to pick
+common_voice_train = df[0:5]
+
+# Convert dataset to DataFrame
+data = {'path': [], 'sentence': []}
+for count, example in enumerate(common_voice["test"]):
+    data['path'].append(example["audio"]["path"])
+    data['sentence'].append(example["sentence"])
+
+df = pd.DataFrame(data)
+# Just specify how many lines to pick
+common_voice_test = df[0:5]
+
+common_voice["train"] = Dataset.from_pandas(common_voice_train)
+common_voice["test"] = Dataset.from_pandas(common_voice_test)
 print('###############Loading Dataset Is Complete################')
 
 
@@ -27,11 +50,11 @@ processor = WhisperProcessor.from_pretrained("openai/whisper-small", language="H
 print('###############Extract, Tokenize and Process Is Complete################')
 
 #Prepare Data
-common_voice = common_voice.cast_column("audio", Audio(sampling_rate=16000))
+common_voice = common_voice.cast_column("path", Audio(sampling_rate=16000))
 
 def prepare_dataset(batch):
     # load and resample audio data from 48 to 16kHz
-    audio = batch["audio"]
+    audio = batch["path"]
 
     # compute log-Mel input features from input audio array 
     batch["input_features"] = feature_extractor(audio["array"], sampling_rate=audio["sampling_rate"]).input_features[0]
@@ -77,15 +100,27 @@ print('###############Data Collator Is Complete################')
 
 metric = evaluate.load("wer")
 
+def flattenList(id_list):
+    flatten_list = [item for sublist in id_list for item in sublist]
+    return flatten_list
+
+
 def compute_metrics(pred):
     pred_ids = pred.predictions
     label_ids = pred.label_ids
 
-    # replace -100 with the pad_token_id
-    label_ids[label_ids == -100] = tokenizer.pad_token_id
+    # # replace -100 with the pad_token_id
+    # label_ids[label_ids == -100] = tokenizer.pad_token_id
+    # Flatten the list of lists into a single list
+    pred_ids = [item for sublist in pred_ids for item in sublist]
+    label_ids = [item for sublist in label_ids for item in sublist]
+
+    # Replace -100 with the pad_token_id
+    label_ids = [id_ if id_ != -100 else tokenizer.pad_token_id for id_ in label_ids]
+
 
     # we do not want to group tokens when computing the metrics
-    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
+    pred_str = tokenizer.batch_decode(flattenList(pred), skip_special_tokens=True)
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
     wer = 100 * metric.compute(predictions=pred_str, references=label_str)
@@ -99,23 +134,25 @@ print('###############Compute metrics Is Complete################')
 # Define the adapter layers
 model = WhisperForConditionalGeneration.from_pretrained(model_name)
 adapter_config = AdapterConfig.load("pfeiffer")
-model.add_adapter("transcribe")
-
+model.add_adapter("transcribe", config=adapter_config)
+model.set_active_adapters("transcribe")
+print(model.active_adapters)
 print('###############Adapter Inclusion Is Complete################')
 
 
 
 # Set up your training arguments and data
 training_args = TrainingArguments(
-    #max_steps=80000,
+    max_steps=1,
     output_dir="./results",
     num_train_epochs=6,
     learning_rate=3e-4,
     per_device_train_batch_size=2,
     per_device_eval_batch_size=2,
-    logging_steps=1000,
+    logging_steps=1,
     overwrite_output_dir=True,
-    remove_unused_columns=False
+    remove_unused_columns=False,
+    metric_for_best_model="wer",
     #save_total_limit=2,
 )
 
@@ -160,3 +197,4 @@ trainer.train()
 print('###############Training Is Complete################')
 
 trainer.evaluate()
+print('###############Evaluation Is Complete################')
