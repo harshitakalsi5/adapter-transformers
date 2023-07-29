@@ -55,8 +55,6 @@ CONFIG_CLASS_KEYS_MAPPING = {
     },
     "vit": {},
     "whisper": {
-        "num_attention_heads": "encoder_attention_heads",
-        "hidden_size": "d_model",
         "hidden_dropout_prob": "dropout",
         "attention_probs_dropout_prob": "attention_dropout",
     },

@@ -110,17 +110,17 @@ def compute_metrics(pred):
     label_ids = pred.label_ids
 
     # # replace -100 with the pad_token_id
-    # label_ids[label_ids == -100] = tokenizer.pad_token_id
+    label_ids[label_ids == -100] = tokenizer.pad_token_id
     # Flatten the list of lists into a single list
-    pred_ids = [item for sublist in pred_ids for item in sublist]
-    label_ids = [item for sublist in label_ids for item in sublist]
+    # pred_ids = [item for sublist in pred_ids for item in sublist]
+    # label_ids = [item for sublist in label_ids for item in sublist]
 
-    # Replace -100 with the pad_token_id
-    label_ids = [id_ if id_ != -100 else tokenizer.pad_token_id for id_ in label_ids]
+    # # Replace -100 with the pad_token_id
+    # label_ids = [id_ if id_ != -100 else tokenizer.pad_token_id for id_ in label_ids]
 
 
     # we do not want to group tokens when computing the metrics
-    pred_str = tokenizer.batch_decode(flattenList(pred), skip_special_tokens=True)
+    pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
     wer = 100 * metric.compute(predictions=pred_str, references=label_str)

@@ -39,10 +39,13 @@ from ...adapters.mixins.whisper import (
 from ...adapters.model_mixin import InvertibleAdaptersMixin
 from ...adapters.prefix_tuning import PrefixTuningShim
 from ...modeling_outputs import (
-    BaseModelOutput,
+   BaseModelOutput,
     BaseModelOutputWithPastAndCrossAttentions,
+    CausalLMOutputWithCrossAttentions,
     Seq2SeqLMOutput,
     Seq2SeqModelOutput,
+    Seq2SeqQuestionAnsweringModelOutput,
+    Seq2SeqSequenceClassifierOutput,
 )
 from ...modeling_utils import PreTrainedModel
 from ...utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
@@ -145,9 +148,9 @@ class WhisperAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.is_decoder = is_decoder
 
-        self.k_proj = nn.Linear(embed_dim, embed_dim, bias=False)
-        self.v_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
-        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
+        self.k_proj = LoRALinear(embed_dim, embed_dim, "selfattn", config, attn_key="k", bias=False)
+        self.v_proj = LoRALinear(embed_dim, embed_dim, "selfattn", config, attn_key="v", bias=bias)
+        self.q_proj = LoRALinear(embed_dim, embed_dim, "selfattn", config, attn_key="q", bias=bias)
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
 
         self.prefix_tuning = PrefixTuningShim(location_key + "_prefix" if location_key else None, config)
@@ -213,6 +216,12 @@ class WhisperAttention(nn.Module):
             past_key_value = (key_states, value_states)
 
         proj_shape = (bsz * self.num_heads, -1, self.head_dim)
+
+        key_states, value_states, attention_mask = self.prefix_tuning(
+            key_states, value_states, hidden_states, attention_mask
+        )
+        (query_states,) = adjust_tensors_for_parallel(key_states, query_states)
+
         query_states = self._shape(query_states, tgt_len, bsz).view(*proj_shape)
         key_states = key_states.view(*proj_shape)
         value_states = value_states.view(*proj_shape)
@@ -294,8 +303,8 @@ class WhisperEncoderLayer(WhisperEncoderLayerAdaptersMixin,nn.Module):
         self.dropout = config.dropout
         self.activation_fn = ACT2FN[config.activation_function]
         self.activation_dropout = config.activation_dropout
-        self.fc1 = nn.Linear(self.embed_dim, config.encoder_ffn_dim)
-        self.fc2 = nn.Linear(config.encoder_ffn_dim, self.embed_dim)
+        self.fc1 = LoRALinear(self.embed_dim, config.encoder_ffn_dim, "intermediate", config)
+        self.fc2 = LoRALinear(config.encoder_ffn_dim, self.embed_dim, "output", config)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
         self._init_adapter_modules()
 
@@ -326,15 +335,14 @@ class WhisperEncoderLayer(WhisperEncoderLayerAdaptersMixin,nn.Module):
             output_attentions=output_attentions,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
-
+        hidden_states = self.attention_adapters(hidden_states, residual, None)
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.activation_fn(self.fc1(hidden_states))
         hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
         hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
+        hidden_states = self.attention_adapters(hidden_states, residual, None)
 
         if hidden_states.dtype == torch.float16 and (
             torch.isinf(hidden_states).any() or torch.isnan(hidden_states).any()
@@ -379,8 +387,8 @@ class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
             location_key="cross",
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.fc1 = nn.Linear(self.embed_dim, config.decoder_ffn_dim)
-        self.fc2 = nn.Linear(config.decoder_ffn_dim, self.embed_dim)
+        self.fc1 = LoRALinear(self.embed_dim, config.encoder_ffn_dim, "intermediate", config)
+        self.fc2 = LoRALinear(config.encoder_ffn_dim, self.embed_dim, "output", config)
         self.final_layer_norm = nn.LayerNorm(self.embed_dim)
 
         self._init_adapter_modules()
@@ -430,7 +438,7 @@ class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
             output_attentions=output_attentions,
         )
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
+        hidden_states = self.output_adapters(hidden_states, residual, None)
 
         # Cross-Attention Block
         cross_attn_present_key_value = None
@@ -450,7 +458,7 @@ class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
                 output_attentions=output_attentions,
             )
             hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-            hidden_states = residual + hidden_states
+            hidden_states = self.output_adapters(hidden_states, residual, None)
 
             # add cross-attn to positions 3,4 of present_key_value tuple
             present_key_value = present_key_value + cross_attn_present_key_value
@@ -462,7 +470,7 @@ class WhisperDecoderLayer(WhisperDecoderLayerAdaptersMixin,nn.Module):
         hidden_states = nn.functional.dropout(hidden_states, p=self.activation_dropout, training=self.training)
         hidden_states = self.fc2(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.dropout, training=self.training)
-        hidden_states = residual + hidden_states
+        hidden_states = self.output_adapters(hidden_states, residual, None)
 
         outputs = (hidden_states,)
 
@@ -480,7 +488,6 @@ class WhisperPreTrainedModel(PreTrainedModel):
     base_model_prefix = "model"
     main_input_name = "input_features"
     supports_gradient_checkpointing = True
-    _no_split_modules = ["WhisperEncoderLayer"]
 
     def _init_weights(self, module):
         std = self.config.init_std
@@ -612,6 +619,7 @@ class WhisperEncoder(InvertibleAdaptersMixin,WhisperPreTrainedModel):
 
     def __init__(self, config: WhisperConfig):
         super().__init__(config)
+        self.config = config
         self.dropout = config.dropout
         self.layerdrop = config.encoder_layerdrop
 
@@ -728,6 +736,7 @@ class WhisperEncoder(InvertibleAdaptersMixin,WhisperPreTrainedModel):
                     )
 
                 hidden_states = layer_outputs[0]
+                (attention_mask,) = adjust_tensors_for_parallel(hidden_states, attention_mask)
 
             if output_attentions:
                 all_attentions = all_attentions + (layer_outputs[1],)
@@ -789,7 +798,9 @@ class WhisperDecoder(WhisperPreTrainedModel):
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
+                inputs_embeds.device
+            )
             combined_attention_mask = (
                 expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
             )
@@ -965,7 +976,7 @@ class WhisperDecoder(WhisperPreTrainedModel):
                     use_cache=use_cache,
                 )
             hidden_states = layer_outputs[0]
-
+            (attention_mask,) = adjust_tensors_for_parallel(hidden_states, attention_mask)
             if use_cache:
                 next_decoder_cache += (layer_outputs[3 if output_attentions else 1],)
 
@@ -1034,6 +1045,7 @@ class WhisperModel(WhisperModelAdaptersMixin,WhisperPreTrainedModel):
 
     @add_start_docstrings_to_model_forward(WHISPER_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=Seq2SeqModelOutput, config_class=_CONFIG_FOR_DOC)
+    @ForwardContext.wrap
     def forward(
         self,
         input_features: Optional[torch.LongTensor] = None,
